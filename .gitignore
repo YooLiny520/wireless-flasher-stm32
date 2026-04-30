@@ -1,6 +1,7 @@
 .pio/
 .claude/
 .vscode/
+release/
 *.pyc
 __pycache__/
 .DS_Store
