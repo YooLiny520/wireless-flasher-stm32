@@ -5,15 +5,10 @@ const statusLog = document.getElementById('statusLog');
 const uploadLog = document.getElementById('uploadLog');
 const progressBar = document.getElementById('progressBar');
 const hexFile = document.getElementById('hexFile');
-const manifestFile = document.getElementById('manifestFile');
-const firmwareFile = document.getElementById('firmwareFile');
 const refreshDeviceButton = document.getElementById('refreshDeviceButton');
 const readChipButton = document.getElementById('readChipButton');
 const flashPackageSelect = document.getElementById('flashPackageSelect');
-const transportSelect = document.getElementById('transportSelect');
-const modeSelect = document.getElementById('modeSelect');
 const flashHint = document.getElementById('flashHint');
-const manifestExample = document.getElementById('manifestExample');
 const wiringTemplate = document.getElementById('wiringTemplate');
 const storageInfo = document.getElementById('storageInfo');
 const firmwareNameInput = document.getElementById('firmwareNameInput');
@@ -22,7 +17,6 @@ const savedPackageLog = document.getElementById('savedPackageLog');
 const savePackageButton = document.getElementById('savePackageButton');
 const deleteSavedPackageButton = document.getElementById('deleteSavedPackageButton');
 
-let transportInitialized = false;
 let latestPackageReady = false;
 
 function setUploadLog(message) {
@@ -60,38 +54,22 @@ function updateFlashHint() {
   flashHint.textContent = `${selectedText}当前只保留 SWD：请连接 SWDIO11 / SWCLK12 / GND，不接 NRST。`;
 }
 
-function updateFlashControls(info = null) {
-  transportSelect.value = 'swd';
-  modeSelect.value = 'manual';
+function updateFlashControls() {
   updateFlashHint();
 }
 
 async function refreshInfo() {
   try {
     const info = await request('/api/info');
-    if (!transportInitialized) {
-      transportSelect.value = 'swd';
-      transportInitialized = true;
-    }
     latestPackageReady = Boolean(info.packageReady);
-    const selectedTransport = 'swd';
     const packageText = info.packageReady
       ? ` | 固件: ${info.targetChip || '-'} @ 0x${Number(info.targetAddress || 0).toString(16).toUpperCase()} | ${info.totalBytes} bytes | CRC32 0x${Number(info.firmwareCrc32 || 0).toString(16).toUpperCase().padStart(8, '0')}`
       : ' | 暂无已校验固件包';
-    deviceInfo.textContent = `热点: ${info.ssid} | 地址: ${info.ip} | 选择接口: ${selectedTransport} | 当前设备接口: ${info.transport || 'swd'} | 当前状态: ${info.state}${packageText}`;
+    deviceInfo.textContent = `热点: ${info.ssid} | 地址: ${info.ip} | 接口: SWD | 当前状态: ${info.state}${packageText}`;
     wiringTemplate.textContent = `GND  -> STM32 GND\nGPIO${info.swdIoPin} -> STM32 SWDIO\nGPIO${info.swdClockPin} -> STM32 SWCLK`;
     updateFlashControls(info);
   } catch (error) {
     deviceInfo.textContent = error.message;
-  }
-}
-
-async function refreshManifestExample() {
-  try {
-    const response = await fetch('/api/manifest/example');
-    manifestExample.textContent = await response.text();
-  } catch (error) {
-    manifestExample.textContent = error.message;
   }
 }
 
@@ -150,7 +128,7 @@ async function refreshStatus() {
     const percent = status.totalBytes > 0 ? Math.round((status.bytesWritten / status.totalBytes) * 100) : 0;
     const addressHex = `0x${Number(status.targetAddress || 0).toString(16).toUpperCase()}`;
     const crcHex = `0x${Number(status.firmwareCrc32 || 0).toString(16).toUpperCase().padStart(8, '0')}`;
-    statusSummary.textContent = `${status.state} | 接口: ${status.transport || 'swd'} | 模式: ${status.targetMode} | 芯片: ${status.targetChip || '-'} | 地址: ${addressHex} | CRC32: ${crcHex} | ${status.bytesWritten}/${status.totalBytes}`;
+    statusSummary.textContent = `${status.state} | 接口: SWD | 芯片: ${status.targetChip || '-'} | 地址: ${addressHex} | CRC32: ${crcHex} | ${status.bytesWritten}/${status.totalBytes}`;
     progressBar.value = percent;
     statusLog.textContent = status.log || (status.detectedChip ? `${status.message}\n${status.detectedChip}` : status.message);
   } catch (error) {
@@ -184,27 +162,16 @@ document.getElementById('uploadButton').addEventListener('click', async () => {
   setUploadLog('点击上传并校验');
   try {
     setUploadLog(`HEX 文件: ${hexFile.files[0] ? hexFile.files[0].name : '未选择'}`);
-    setUploadLog(`manifest 文件: ${manifestFile.files[0] ? manifestFile.files[0].name : '未选择'}`);
-    setUploadLog(`bin 文件: ${firmwareFile.files[0] ? firmwareFile.files[0].name : '未选择'}`);
-    if (hexFile.files[0]) {
-      setUploadLog('进入 Intel HEX 上传流程');
-      await uploadSingle(hexFile.files[0], 'firmware.hex');
-      setUploadLog('HEX 上传完成，开始请求 /api/upload/hex/finalize...');
-      const result = await request('/api/upload/hex/finalize', { method: 'POST' });
-      setUploadLog(`HEX 校验完成: ${result.message || 'ok'}`);
-      if (result.size) {
-        setUploadLog(`生成固件: ${result.size} bytes @ 0x${Number(result.address || 0).toString(16).toUpperCase()}, CRC32 0x${Number(result.crc32 || 0).toString(16).toUpperCase().padStart(8, '0')}`);
-      }
-    } else {
-      setUploadLog('未选择 HEX，检查旧格式 manifest.json + app.bin');
-      if (!manifestFile.files[0] || !firmwareFile.files[0]) {
-        throw new Error('请选择 Intel HEX，或同时选择 manifest.json 和 app.bin');
-      }
-      await uploadSingle(manifestFile.files[0]);
-      await uploadSingle(firmwareFile.files[0]);
-      setUploadLog('旧格式上传完成，开始请求 /api/upload/finalize...');
-      const result = await request('/api/upload/finalize', { method: 'POST' });
-      setUploadLog(`旧格式校验完成: ${result.message || 'ok'}`);
+    if (!hexFile.files[0]) {
+      throw new Error('请选择 Intel HEX 文件');
+    }
+    setUploadLog('进入 Intel HEX 上传流程');
+    await uploadSingle(hexFile.files[0], 'firmware.hex');
+    setUploadLog('HEX 上传完成，开始请求 /api/upload/hex/finalize...');
+    const result = await request('/api/upload/hex/finalize', { method: 'POST' });
+    setUploadLog(`HEX 校验完成: ${result.message || 'ok'}`);
+    if (result.size) {
+      setUploadLog(`生成固件: ${result.size} bytes @ 0x${Number(result.address || 0).toString(16).toUpperCase()}, CRC32 0x${Number(result.crc32 || 0).toString(16).toUpperCase().padStart(8, '0')}`);
     }
     setUploadLog('刷新设备信息...');
     await refreshInfo();
@@ -224,7 +191,7 @@ document.getElementById('flashButton').addEventListener('click', async () => {
     const response = await request('/api/flash/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ transport: 'swd', mode: 'manual', savedPackageId })
+      body: JSON.stringify({ savedPackageId })
     });
     statusLog.textContent = response.message;
     await refreshStatus();
@@ -315,7 +282,6 @@ deleteSavedPackageButton.addEventListener('click', async () => {
   }
 });
 
-transportSelect.addEventListener('change', () => updateFlashControls());
 refreshDeviceButton.addEventListener('click', async () => {
   await refreshInfo();
   await refreshStatus();
@@ -339,7 +305,6 @@ readChipButton.addEventListener('click', async () => {
 refreshInfo();
 refreshStatus();
 refreshPackages();
-refreshManifestExample();
 updateFlashControls();
 setInterval(refreshStatus, 1000);
 setInterval(refreshInfo, 5000);

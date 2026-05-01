@@ -19,11 +19,6 @@ bool isHexUploadName(const String &filename) {
   return lower.endsWith(".hex") || lower.endsWith(".ihx");
 }
 
-bool isFlashBusyState(FlashState state) {
-  return state != FlashState::Idle && state != FlashState::UploadReady && state != FlashState::Success &&
-         state != FlashState::Error && state != FlashState::Cancelled;
-}
-
 String chipNameFromId(uint32_t chipId) {
   switch (chipId) {
     case 0x0410:
@@ -88,14 +83,9 @@ const char kEmbeddedIndexHtml[] PROGMEM = R"HTML(<!doctype html>
       </div>
       <div class="card">
         <h2>上传固件包</h2>
-        <p class="muted">推荐：直接上传 Intel HEX 文件，不需要 manifest.json。</p>
+        <p class="muted">上传 Intel HEX 文件，设备会自动解析地址并生成烧录包。</p>
         <label>Intel HEX</label>
-        <input id="hexFile" type="file" />
-        <p class="muted">旧格式备用：同时选择 manifest.json 和 app.bin。</p>
-        <label>manifest.json</label>
-        <input id="manifestFile" type="file" accept="application/json,.json" />
-        <label>app.bin</label>
-        <input id="firmwareFile" type="file" accept=".bin,application/octet-stream" />
+        <input id="hexFile" type="file" accept=".hex,.ihx" />
         <div class="row">
           <button id="uploadButton" onclick="document.getElementById('uploadLog').textContent='按钮已点击，内置页面事件已触发。';">上传并校验</button>
           <button id="deleteButton" class="secondary">删除当前固件包</button>
@@ -120,18 +110,9 @@ const char kEmbeddedIndexHtml[] PROGMEM = R"HTML(<!doctype html>
         <pre id="savedPackageLog">等待操作。</pre>
       </div>
       <div class="card">
-        <h2>manifest 示例</h2>
-        <pre id="manifestExample">正在加载示例...</pre>
-      </div>
-      <div class="card">
         <h2>开始烧录</h2>
         <label>烧录固件</label>
         <select id="flashPackageSelect"></select>
-        <label>烧录接口</label>
-        <select id="transportSelect" disabled>
-          <option value="swd" selected>SWD (STM32F1)</option>
-        </select>
-        <input id="modeSelect" type="hidden" value="manual" />
         <p id="flashHint" class="muted">当前只保留 SWD：请连接 SWDIO11 / SWCLK12 / GND，不接 NRST。</p>
         <div class="row">
           <button id="flashButton">开始烧录</button>
@@ -158,15 +139,10 @@ const statusLog = document.getElementById('statusLog');
 const uploadLog = document.getElementById('uploadLog');
 const progressBar = document.getElementById('progressBar');
 const hexFile = document.getElementById('hexFile');
-const manifestFile = document.getElementById('manifestFile');
-const firmwareFile = document.getElementById('firmwareFile');
 const refreshDeviceButton = document.getElementById('refreshDeviceButton');
 const readChipButton = document.getElementById('readChipButton');
 const flashPackageSelect = document.getElementById('flashPackageSelect');
-const transportSelect = document.getElementById('transportSelect');
-const modeSelect = document.getElementById('modeSelect');
 const flashHint = document.getElementById('flashHint');
-const manifestExample = document.getElementById('manifestExample');
 const wiringTemplate = document.getElementById('wiringTemplate');
 const storageInfo = document.getElementById('storageInfo');
 const firmwareNameInput = document.getElementById('firmwareNameInput');
@@ -175,7 +151,6 @@ const savedPackageLog = document.getElementById('savedPackageLog');
 const savePackageButton = document.getElementById('savePackageButton');
 const deleteSavedPackageButton = document.getElementById('deleteSavedPackageButton');
 
-let transportInitialized = false;
 let latestPackageReady = false;
 
 function setUploadLog(message) {
@@ -213,38 +188,22 @@ function updateFlashHint() {
   flashHint.textContent = `${selectedText}当前只保留 SWD：请连接 SWDIO11 / SWCLK12 / GND，不接 NRST。`;
 }
 
-function updateFlashControls(info = null) {
-  transportSelect.value = 'swd';
-  modeSelect.value = 'manual';
+function updateFlashControls() {
   updateFlashHint();
 }
 
 async function refreshInfo() {
   try {
     const info = await request('/api/info');
-    if (!transportInitialized) {
-      transportSelect.value = 'swd';
-      transportInitialized = true;
-    }
     latestPackageReady = Boolean(info.packageReady);
-    const selectedTransport = 'swd';
     const packageText = info.packageReady
       ? ` | 固件: ${info.targetChip || '-'} @ 0x${Number(info.targetAddress || 0).toString(16).toUpperCase()} | ${info.totalBytes} bytes | CRC32 0x${Number(info.firmwareCrc32 || 0).toString(16).toUpperCase().padStart(8, '0')}`
       : ' | 暂无已校验固件包';
-    deviceInfo.textContent = `热点: ${info.ssid} | 地址: ${info.ip} | 选择接口: ${selectedTransport} | 当前设备接口: ${info.transport || 'swd'} | 当前状态: ${info.state}${packageText}`;
+    deviceInfo.textContent = `热点: ${info.ssid} | 地址: ${info.ip} | 接口: SWD | 当前状态: ${info.state}${packageText}`;
     wiringTemplate.textContent = `GND  -> STM32 GND\nGPIO${info.swdIoPin} -> STM32 SWDIO\nGPIO${info.swdClockPin} -> STM32 SWCLK`;
     updateFlashControls(info);
   } catch (error) {
     deviceInfo.textContent = error.message;
-  }
-}
-
-async function refreshManifestExample() {
-  try {
-    const response = await fetch('/api/manifest/example');
-    manifestExample.textContent = await response.text();
-  } catch (error) {
-    manifestExample.textContent = error.message;
   }
 }
 
@@ -274,6 +233,7 @@ async function refreshPackages() {
       for (const item of packages) {
         const option = document.createElement('option');
         option.value = item.id;
+        option.dataset.name = item.name || '';
         const address = `0x${Number(item.address || 0).toString(16).toUpperCase()}`;
         const crc = `0x${Number(item.crc32 || 0).toString(16).toUpperCase().padStart(8, '0')}`;
         option.textContent = `${item.name || item.id} | ${formatBytes(item.size)} @ ${address} | CRC32 ${crc}`;
@@ -303,7 +263,7 @@ async function refreshStatus() {
     const percent = status.totalBytes > 0 ? Math.round((status.bytesWritten / status.totalBytes) * 100) : 0;
     const addressHex = `0x${Number(status.targetAddress || 0).toString(16).toUpperCase()}`;
     const crcHex = `0x${Number(status.firmwareCrc32 || 0).toString(16).toUpperCase().padStart(8, '0')}`;
-    statusSummary.textContent = `${status.state} | 接口: ${status.transport || 'swd'} | 模式: ${status.targetMode} | 芯片: ${status.targetChip || '-'} | 地址: ${addressHex} | CRC32: ${crcHex} | ${status.bytesWritten}/${status.totalBytes}`;
+    statusSummary.textContent = `${status.state} | 接口: SWD | 芯片: ${status.targetChip || '-'} | 地址: ${addressHex} | CRC32: ${crcHex} | ${status.bytesWritten}/${status.totalBytes}`;
     progressBar.value = percent;
     statusLog.textContent = status.log || (status.detectedChip ? `${status.message}\n${status.detectedChip}` : status.message);
   } catch (error) {
@@ -313,11 +273,12 @@ async function refreshStatus() {
 
 async function uploadSingle(file, uploadName = file.name) {
   setUploadLog(`准备上传: ${file.name}, ${file.size} bytes, 服务器文件名: ${uploadName}`);
+  const startedAt = performance.now();
   const formData = new FormData();
   formData.append('file', file, uploadName);
   setUploadLog('发送 /api/upload 请求...');
   const response = await fetch('/api/upload', { method: 'POST', body: formData });
-  setUploadLog(`/api/upload 响应: HTTP ${response.status}`);
+  setUploadLog(`/api/upload 响应: HTTP ${response.status}, 耗时 ${Math.round(performance.now() - startedAt)} ms`);
   const text = await response.text();
   setUploadLog(`/api/upload 返回: ${text || '(empty)'}`);
   let data = {};
@@ -337,27 +298,24 @@ document.getElementById('uploadButton').addEventListener('click', async () => {
   setUploadLog('点击上传并校验');
   try {
     setUploadLog(`HEX 文件: ${hexFile.files[0] ? hexFile.files[0].name : '未选择'}`);
-    setUploadLog(`manifest 文件: ${manifestFile.files[0] ? manifestFile.files[0].name : '未选择'}`);
-    setUploadLog(`bin 文件: ${firmwareFile.files[0] ? firmwareFile.files[0].name : '未选择'}`);
-    if (hexFile.files[0]) {
-      setUploadLog('进入 Intel HEX 上传流程');
-      await uploadSingle(hexFile.files[0], 'firmware.hex');
-      setUploadLog('HEX 上传完成，开始请求 /api/upload/hex/finalize...');
-      const result = await request('/api/upload/hex/finalize', { method: 'POST' });
-      setUploadLog(`HEX 校验完成: ${result.message || 'ok'}`);
-      if (result.size) {
-        setUploadLog(`生成固件: ${result.size} bytes @ 0x${Number(result.address || 0).toString(16).toUpperCase()}, CRC32 0x${Number(result.crc32 || 0).toString(16).toUpperCase().padStart(8, '0')}`);
-      }
-    } else {
-      setUploadLog('未选择 HEX，检查旧格式 manifest.json + app.bin');
-      if (!manifestFile.files[0] || !firmwareFile.files[0]) {
-        throw new Error('请选择 Intel HEX，或同时选择 manifest.json 和 app.bin');
-      }
-      await uploadSingle(manifestFile.files[0]);
-      await uploadSingle(firmwareFile.files[0]);
-      setUploadLog('旧格式上传完成，开始请求 /api/upload/finalize...');
-      const result = await request('/api/upload/finalize', { method: 'POST' });
-      setUploadLog(`旧格式校验完成: ${result.message || 'ok'}`);
+    if (!hexFile.files[0]) {
+      throw new Error('请选择 Intel HEX 文件');
+    }
+    setUploadLog('进入 Intel HEX 上传流程');
+    await uploadSingle(hexFile.files[0], 'firmware.hex');
+    setUploadLog('HEX 上传完成，开始请求 /api/upload/hex/finalize...');
+    const finalizeStartedAt = performance.now();
+    const result = await request('/api/upload/hex/finalize', { method: 'POST' });
+    setUploadLog(`/api/upload/hex/finalize 完成，耗时 ${Math.round(performance.now() - finalizeStartedAt)} ms`);
+    setUploadLog(`HEX 校验完成: ${result.message || 'ok'}`);
+    if (result.hexSize) {
+      setUploadLog(`HEX 原始大小: ${result.hexSize} bytes`);
+    }
+    if (result.size) {
+      setUploadLog(`生成固件: ${result.size} bytes @ 0x${Number(result.address || 0).toString(16).toUpperCase()}, CRC32 0x${Number(result.crc32 || 0).toString(16).toUpperCase().padStart(8, '0')}`);
+    }
+    if (result.freeBytes !== undefined) {
+      setUploadLog(`LittleFS: free ${result.freeBytes} bytes, used ${result.usedBytes} / ${result.totalBytes}`);
     }
     setUploadLog('刷新设备信息...');
     await refreshInfo();
@@ -377,7 +335,7 @@ document.getElementById('flashButton').addEventListener('click', async () => {
     const response = await request('/api/flash/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ transport: 'swd', mode: 'manual', savedPackageId })
+      body: JSON.stringify({ savedPackageId })
     });
     statusLog.textContent = response.message;
     await refreshStatus();
@@ -412,10 +370,22 @@ document.getElementById('deleteButton').addEventListener('click', async () => {
 savePackageButton.addEventListener('click', async () => {
   setSavedPackageLog('正在保存当前固件...');
   try {
+    await refreshPackages();
+    const requestedName = firmwareNameInput.value.trim();
+    let replaceId = '';
+    const duplicateOption = requestedName
+      ? Array.from(savedPackageSelect.options).find(option => option.dataset.name === requestedName)
+      : null;
+    if (duplicateOption) {
+      const replace = confirm(`已存在名为“${requestedName}”的固件。\n\n确定：替换已有固件\n取消：共存并自动添加序号`);
+      if (replace) {
+        replaceId = duplicateOption.value;
+      }
+    }
     const result = await request('/api/packages/save', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: firmwareNameInput.value })
+      body: JSON.stringify({ name: requestedName, replaceId })
     });
     setSavedPackageLog(`已保存: ${result.name || result.id}`);
     firmwareNameInput.value = '';
@@ -468,7 +438,6 @@ deleteSavedPackageButton.addEventListener('click', async () => {
   }
 });
 
-transportSelect.addEventListener('change', () => updateFlashControls());
 refreshDeviceButton.addEventListener('click', async () => {
   await refreshInfo();
   await refreshStatus();
@@ -492,7 +461,6 @@ readChipButton.addEventListener('click', async () => {
 refreshInfo();
 refreshStatus();
 refreshPackages();
-refreshManifestExample();
 updateFlashControls();
 setInterval(refreshStatus, 1000);
 setInterval(refreshInfo, 5000);
@@ -534,7 +502,6 @@ void AppWebServer::configureRoutes() {
 
   server_->on("/api/info", HTTP_GET, [this]() { handleInfo(); });
   server_->on("/api/status", HTTP_GET, [this]() { handleStatus(); });
-  server_->on("/api/manifest/example", HTTP_GET, [this]() { handleManifestExample(); });
   server_->on("/api/flash/start", HTTP_POST, [this]() { handleFlashStart(); });
   server_->on("/api/flash/cancel", HTTP_POST, [this]() { handleFlashCancel(); });
   server_->on("/api/package", HTTP_DELETE, [this]() { handleDeletePackage(); });
@@ -553,23 +520,15 @@ void AppWebServer::configureRoutes() {
         String error;
 
         if (upload.status == UPLOAD_FILE_START) {
-          if (upload.filename != "manifest.json" && upload.filename != "app.bin" && !isHexUploadName(upload.filename)) {
-            sendError(400, "Only Intel HEX, manifest.json and app.bin are supported");
+          if (!isHexUploadName(upload.filename)) {
+            sendError(400, "Only Intel HEX files are supported");
             return;
           }
         }
 
         if (upload.status == UPLOAD_FILE_WRITE) {
-          bool ok = false;
           const bool reset = upload.totalSize == 0;
-          if (upload.filename == "manifest.json") {
-            ok = packageStore_.saveManifestJson(upload.buf, upload.currentSize, reset, error);
-          } else if (upload.filename == "app.bin") {
-            ok = packageStore_.appendFirmwareChunk(upload.buf, upload.currentSize, reset, error);
-          } else if (isHexUploadName(upload.filename)) {
-            ok = packageStore_.appendIntelHexChunk(upload.buf, upload.currentSize, reset, error);
-          }
-          if (!ok) {
+          if (!packageStore_.appendIntelHexChunk(upload.buf, upload.currentSize, reset, error)) {
             sendError(400, error);
           }
         }
@@ -582,7 +541,6 @@ void AppWebServer::configureRoutes() {
           return;
         }
       });
-  server_->on("/api/upload/finalize", HTTP_POST, [this]() { handleUploadFinalize(); });
   server_->on("/api/upload/hex/finalize", HTTP_POST, [this]() { handleHexUploadFinalize(); });
   server_->on("/api/packages", HTTP_GET, [this]() { handlePackages(); });
   server_->on("/api/packages/save", HTTP_POST, [this]() { handleSavePackage(); });
@@ -610,14 +568,6 @@ void AppWebServer::handleInfo() {
   doc["ip"] = apManager_.ipAddress();
   doc["passwordRequired"] = apManager_.hasPassword();
   doc["packageReady"] = status.packageReady;
-  doc["automaticAvailable"] = false;
-  doc["transport"] = "swd";
-  doc["targetMode"] = status.targetMode;
-  doc["targetBaudRate"] = AppConfig::kTargetBaudRate;
-  doc["targetUartRxPin"] = AppConfig::kTargetUartRxPin;
-  doc["targetUartTxPin"] = AppConfig::kTargetUartTxPin;
-  doc["targetBoot0Pin"] = AppConfig::kTargetBoot0Pin;
-  doc["targetResetPin"] = AppConfig::kTargetResetPin;
   doc["swdIoPin"] = AppConfig::kSwdIoPin;
   doc["swdClockPin"] = AppConfig::kSwdClockPin;
   doc["swdResetPin"] = AppConfig::kSwdResetPin;
@@ -646,8 +596,6 @@ void AppWebServer::handleStatus() {
   doc["state"] = status.stateLabel;
   doc["message"] = status.message;
   doc["log"] = status.log;
-  doc["transport"] = "swd";
-  doc["targetMode"] = status.targetMode;
   doc["targetChip"] = status.targetChip;
   doc["detectedChip"] = status.detectedChip;
   doc["targetAddress"] = status.targetAddress;
@@ -655,46 +603,21 @@ void AppWebServer::handleStatus() {
   doc["bytesWritten"] = status.bytesWritten;
   doc["totalBytes"] = status.totalBytes;
   doc["packageReady"] = status.packageReady;
-  doc["automaticAvailable"] = status.automaticAvailable;
 
-  String payload;
-  serializeJson(doc, payload);
-  sendJson(200, payload);
-}
-
-void AppWebServer::handleManifestExample() {
-  JsonDocument doc;
-  doc["target"] = "stm32";
-  doc["chip"] = AppConfig::kExampleTargetChip;
-  doc["address"] = AppConfig::kDefaultFlashAddress;
-  doc["size"] = 0;
-  doc["crc32"] = 0;
-
-  String payload;
-  serializeJsonPretty(doc, payload);
-  server_->send(200, "application/json", payload);
-}
-
-void AppWebServer::handleUploadFinalize() {
-  String error;
-  if (!packageStore_.finalizePackage(error)) {
-    sendError(400, error);
-    return;
-  }
-  if (!flashManager_.setPackageReady(error)) {
-    sendError(400, error);
-    return;
-  }
-
-  JsonDocument doc;
-  doc["ok"] = true;
-  doc["message"] = "Package uploaded successfully";
   String payload;
   serializeJson(doc, payload);
   sendJson(200, payload);
 }
 
 void AppWebServer::handleHexUploadFinalize() {
+  size_t hexSize = 0;
+  if (LittleFS.exists(AppConfig::kHexTempPath)) {
+    File hexFile = LittleFS.open(AppConfig::kHexTempPath, FILE_READ);
+    if (hexFile) {
+      hexSize = hexFile.size();
+      hexFile.close();
+    }
+  }
   String error;
   if (!packageStore_.finalizeIntelHexPackage(error)) {
     sendError(400, error);
@@ -709,6 +632,10 @@ void AppWebServer::handleHexUploadFinalize() {
   JsonDocument doc;
   doc["ok"] = true;
   doc["message"] = "Intel HEX converted successfully";
+  doc["hexSize"] = hexSize;
+  doc["freeBytes"] = packageStore_.freeBytes();
+  doc["usedBytes"] = packageStore_.usedBytes();
+  doc["totalBytes"] = packageStore_.totalBytes();
   doc["chip"] = status.targetChip;
   doc["address"] = status.targetAddress;
   doc["size"] = status.totalBytes;
@@ -720,7 +647,7 @@ void AppWebServer::handleHexUploadFinalize() {
 
 void AppWebServer::handleChipInfo() {
   FlashStatus status = flashManager_.status();
-  if (isFlashBusyState(status.state)) {
+  if (FlashManager::isBusyState(status.state)) {
     sendError(409, "Flash job is busy");
     return;
   }
@@ -757,6 +684,8 @@ void AppWebServer::handleChipInfo() {
   }
 
   const uint32_t chipId = dbgmcuIdcode & 0x0FFFU;
+  flashManager_.setDetectedChip(chipId);
+
   JsonDocument doc;
   doc["ok"] = true;
   doc["dpidr"] = dpId;
@@ -795,22 +724,24 @@ void AppWebServer::handlePackages() {
 
 void AppWebServer::handleSavePackage() {
   FlashStatus status = flashManager_.status();
-  if (isFlashBusyState(status.state)) {
+  if (FlashManager::isBusyState(status.state)) {
     sendError(409, "Flash job is busy");
     return;
   }
 
   String name;
+  String replaceId;
   if (server_->hasArg("plain")) {
     JsonDocument request;
     if (deserializeJson(request, server_->arg("plain")) == DeserializationError::Ok) {
       name = request["name"] | "";
+      replaceId = request["replaceId"] | "";
     }
   }
 
   String error;
   SavedPackageInfo info;
-  if (!packageStore_.saveActivePackage(name, info, error)) {
+  if (!packageStore_.saveActivePackage(name, info, error, replaceId)) {
     sendError(400, error);
     return;
   }
@@ -832,7 +763,7 @@ void AppWebServer::handleSavePackage() {
 
 void AppWebServer::handleSelectPackage() {
   FlashStatus status = flashManager_.status();
-  if (isFlashBusyState(status.state)) {
+  if (FlashManager::isBusyState(status.state)) {
     sendError(409, "Flash job is busy");
     return;
   }
@@ -883,7 +814,7 @@ void AppWebServer::handleSelectPackage() {
 
 void AppWebServer::handleDeleteSavedPackage() {
   FlashStatus status = flashManager_.status();
-  if (isFlashBusyState(status.state)) {
+  if (FlashManager::isBusyState(status.state)) {
     sendError(409, "Flash job is busy");
     return;
   }
@@ -930,7 +861,7 @@ void AppWebServer::handleFlashStart() {
 
   if (!savedPackageId.isEmpty()) {
     FlashStatus status = flashManager_.status();
-    if (isFlashBusyState(status.state)) {
+    if (FlashManager::isBusyState(status.state)) {
       sendError(409, "Flash job is busy");
       return;
     }
@@ -944,7 +875,7 @@ void AppWebServer::handleFlashStart() {
     }
   }
 
-  if (!flashManager_.startFlash(FlashTransport::Swd, TargetControlMode::Manual, error)) {
+  if (!flashManager_.startFlash(error)) {
     sendError(400, error);
     return;
   }

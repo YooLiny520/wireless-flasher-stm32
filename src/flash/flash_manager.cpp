@@ -2,29 +2,41 @@
 
 #include <LittleFS.h>
 #include "app_config.h"
+#include "hal/target_control.h"
 #include "package_store.h"
 
 namespace {
 constexpr const char *kPrefsNamespace = "flasher";
-constexpr const char *kPrefsModeKey = "target_mode";
-constexpr const char *kPrefsTransportKey = "transport";
+
+FlashState progressStateForMessage(const char *message, size_t bytesWritten, size_t totalBytes) {
+  const String text = message ? String(message) : String();
+  if (text.indexOf("verif") >= 0) {
+    return FlashState::Verifying;
+  }
+  if (text.indexOf("program") >= 0 || text.indexOf("Writing") >= 0 || bytesWritten > 0) {
+    return FlashState::Writing;
+  }
+  if (text.indexOf("erase") >= 0) {
+    return FlashState::Erasing;
+  }
+  if (text.indexOf("halt") >= 0) {
+    return FlashState::HaltingTarget;
+  }
+  if (totalBytes > 0) {
+    return FlashState::ConnectingSwd;
+  }
+  return FlashState::Writing;
+}
 }
 
 FlashManager::FlashManager(PackageStore &packageStore,
                            TargetControl &targetControl,
-                           FlashBackend &uartBackend,
                            FlashBackend &swdBackend,
                            Preferences &preferences)
-    : packageStore_(packageStore), targetControl_(targetControl), uartBackend_(uartBackend), swdBackend_(swdBackend),
-      preferences_(preferences) {}
+    : packageStore_(packageStore), targetControl_(targetControl), swdBackend_(swdBackend), preferences_(preferences) {}
 
 void FlashManager::begin() {
   preferences_.begin(kPrefsNamespace, false);
-  status_.automaticAvailable = targetControl_.isAutomaticAvailable();
-  jobTransport_ = FlashTransport::Swd;
-  jobMode_ = TargetControlMode::Manual;
-  updateTransport(jobTransport_);
-  updateTargetMode(jobMode_);
   status_.packageReady = packageStore_.hasPackage();
   if (status_.packageReady) {
     FlashManifest manifest;
@@ -48,6 +60,16 @@ FlashStatus FlashManager::status() {
   FlashStatus copy = status_;
   portEXIT_CRITICAL(&mutex_);
   return copy;
+}
+
+bool FlashManager::isBusy() {
+  return isBusyState(status().state);
+}
+
+bool FlashManager::isBusyState(FlashState state) {
+  return state == FlashState::PreparingTarget || state == FlashState::ConnectingSwd ||
+         state == FlashState::HaltingTarget || state == FlashState::Erasing || state == FlashState::Writing ||
+         state == FlashState::Verifying;
 }
 
 bool FlashManager::setPackageReady(String &error) {
@@ -74,37 +96,22 @@ bool FlashManager::setPackageReady(String &error) {
   return true;
 }
 
-bool FlashManager::startFlash(FlashTransport transport, TargetControlMode mode, String &error) {
-  (void)transport;
-  (void)mode;
-  transport = FlashTransport::Swd;
-  mode = TargetControlMode::Manual;
+bool FlashManager::startFlash(String &error) {
   FlashStatus snapshot = status();
   if (!snapshot.packageReady) {
     error = "Upload a valid package first";
     return false;
   }
-  if (snapshot.state == FlashState::PreparingTarget || snapshot.state == FlashState::ConnectingBootloader ||
-      snapshot.state == FlashState::ConnectingSwd || snapshot.state == FlashState::HaltingTarget ||
-      snapshot.state == FlashState::Erasing || snapshot.state == FlashState::Writing || snapshot.state == FlashState::Verifying) {
+  if (snapshot.state == FlashState::PreparingTarget || snapshot.state == FlashState::ConnectingSwd ||
+      snapshot.state == FlashState::HaltingTarget || snapshot.state == FlashState::Erasing ||
+      snapshot.state == FlashState::Writing || snapshot.state == FlashState::Verifying) {
     error = "A flash job is already running";
     return false;
   }
-  mode = TargetControlMode::Manual;
 
-  jobTransport_ = transport;
-  jobMode_ = mode;
-  persistMode(transport, mode);
-  updateTransport(transport);
-  updateTargetMode(mode);
   cancelRequested_ = false;
   jobQueued_ = true;
-  if (transport == FlashTransport::Swd) {
-    setState(FlashState::PreparingTarget, "Preparing target for SWD");
-  } else {
-    setState(FlashState::PreparingTarget,
-             mode == TargetControlMode::Automatic ? "Preparing target automatically" : "Waiting for the target in bootloader mode");
-  }
+  setState(FlashState::PreparingTarget, "Preparing target for SWD");
   return true;
 }
 
@@ -123,6 +130,16 @@ void FlashManager::clearPackageState() {
 
 void FlashManager::cancel() {
   cancelRequested_ = true;
+}
+
+void FlashManager::setDetectedChip(uint32_t chipId) {
+  updateDetectedChip(chipId);
+}
+
+void FlashManager::clearDetectedChip() {
+  portENTER_CRITICAL(&mutex_);
+  status_.detectedChip = "";
+  portEXIT_CRITICAL(&mutex_);
 }
 
 void FlashManager::workerEntry(void *context) {
@@ -160,25 +177,10 @@ void FlashManager::workerLoop() {
       continue;
     }
 
-    jobTransport_ = FlashTransport::Swd;
-    jobMode_ = TargetControlMode::Manual;
-    FlashBackend &backend = backendFor(jobTransport_);
-    updateTransport(jobTransport_);
-    updateTargetMode(jobMode_);
-
-    if (jobTransport_ == FlashTransport::Swd) {
-      setState(FlashState::PreparingTarget, "Preparing target for SWD");
-      if (!targetControl_.prepareForSwd(error)) {
-        setState(FlashState::Error, error);
-        continue;
-      }
-    } else {
-      setState(FlashState::PreparingTarget,
-               jobMode_ == TargetControlMode::Automatic ? "Preparing target automatically" : "Waiting for manual bootloader mode");
-      if (!targetControl_.prepareForBootloader(jobMode_, error)) {
-        setState(FlashState::Error, error);
-        continue;
-      }
+    setState(FlashState::PreparingTarget, "Preparing target for SWD");
+    if (!targetControl_.prepareForSwd(error)) {
+      setState(FlashState::Error, error);
+      continue;
     }
 
     if (cancelRequested_) {
@@ -186,21 +188,17 @@ void FlashManager::workerLoop() {
       continue;
     }
 
-    if (jobTransport_ == FlashTransport::Swd) {
-      setState(FlashState::ConnectingSwd, "Connecting to the STM32 SWD port");
-    } else {
-      setState(FlashState::ConnectingBootloader, "Connecting to the STM32 bootloader");
-    }
+    setState(FlashState::ConnectingSwd, "Connecting to the STM32 SWD port");
     setState(FlashState::Erasing, "Erasing target flash");
 
-    if (!backend.flash(manifest, LittleFS, AppConfig::kFirmwarePath,
-                       [](size_t bytesWritten, size_t totalBytes, const char *message, void *context) {
-                         return static_cast<FlashManager *>(context)->flashProgress(bytesWritten, totalBytes, message);
-                       },
-                       [](uint32_t chipId, void *context) {
-                         static_cast<FlashManager *>(context)->updateDetectedChip(chipId);
-                       },
-                       this, error)) {
+    if (!swdBackend_.flash(manifest, LittleFS, AppConfig::kFirmwarePath,
+                           [](size_t bytesWritten, size_t totalBytes, const char *message, void *context) {
+                             return static_cast<FlashManager *>(context)->flashProgress(bytesWritten, totalBytes, message);
+                           },
+                           [](uint32_t chipId, void *context) {
+                             static_cast<FlashManager *>(context)->updateDetectedChip(chipId);
+                           },
+                           this, error)) {
       if (error == "Flashing cancelled") {
         setState(FlashState::Cancelled, "Flash job cancelled");
       } else {
@@ -213,10 +211,6 @@ void FlashManager::workerLoop() {
   }
 }
 
-FlashBackend &FlashManager::backendFor(FlashTransport transport) {
-  return transport == FlashTransport::Swd ? swdBackend_ : uartBackend_;
-}
-
 bool FlashManager::flashProgress(size_t bytesWritten, size_t totalBytes, const char *message) {
   if (cancelRequested_) {
     return false;
@@ -225,10 +219,9 @@ bool FlashManager::flashProgress(size_t bytesWritten, size_t totalBytes, const c
   portENTER_CRITICAL(&mutex_);
   status_.bytesWritten = bytesWritten;
   status_.totalBytes = totalBytes;
-  if (bytesWritten > 0 || totalBytes == 0) {
-    status_.state = FlashState::Writing;
-    status_.stateLabel = stateName(FlashState::Writing);
-  }
+  const FlashState progressState = progressStateForMessage(message, bytesWritten, totalBytes);
+  status_.state = progressState;
+  status_.stateLabel = stateName(progressState);
   status_.message = message && message[0] ? message : "Writing firmware";
   if (message && message[0]) {
     if (status_.log.length() > 0) {
@@ -243,12 +236,15 @@ bool FlashManager::flashProgress(size_t bytesWritten, size_t totalBytes, const c
 void FlashManager::updateDetectedChip(uint32_t chipId) {
   const String name = chipName(chipId);
   portENTER_CRITICAL(&mutex_);
+  const bool changed = status_.detectedChip != name;
   status_.detectedChip = name;
   status_.message = "Connected: " + name;
-  if (status_.log.length() > 0) {
-    status_.log += "\n";
+  if (changed) {
+    if (status_.log.length() > 0) {
+      status_.log += "\n";
+    }
+    status_.log += "Detected: " + name;
   }
-  status_.log += "Detected: " + name;
   portEXIT_CRITICAL(&mutex_);
 }
 
@@ -318,33 +314,7 @@ void FlashManager::setState(FlashState state, const String &message) {
     }
     status_.log += message;
   }
-  status_.automaticAvailable = false;
   portEXIT_CRITICAL(&mutex_);
-}
-
-void FlashManager::updateTransport(FlashTransport transport) {
-  portENTER_CRITICAL(&mutex_);
-  status_.transport = "swd";
-  portEXIT_CRITICAL(&mutex_);
-}
-
-void FlashManager::updateTargetMode(TargetControlMode mode) {
-  portENTER_CRITICAL(&mutex_);
-  status_.targetMode = mode == TargetControlMode::Automatic ? targetControl_.modeName(mode) : "manual";
-  portEXIT_CRITICAL(&mutex_);
-}
-
-void FlashManager::persistMode(FlashTransport transport, TargetControlMode mode) {
-  preferences_.putUChar(kPrefsTransportKey, transport == FlashTransport::Swd ? 1 : 0);
-  preferences_.putUChar(kPrefsModeKey, mode == TargetControlMode::Automatic ? 1 : 0);
-}
-
-FlashTransport FlashManager::restoreTransport() const {
-  return FlashTransport::Swd;
-}
-
-TargetControlMode FlashManager::restoreMode() const {
-  return TargetControlMode::Manual;
 }
 
 const char *FlashManager::stateName(FlashState state) const {
@@ -355,8 +325,6 @@ const char *FlashManager::stateName(FlashState state) const {
       return "upload_ready";
     case FlashState::PreparingTarget:
       return "preparing_target";
-    case FlashState::ConnectingBootloader:
-      return "connecting_bootloader";
     case FlashState::ConnectingSwd:
       return "connecting_swd";
     case FlashState::HaltingTarget:

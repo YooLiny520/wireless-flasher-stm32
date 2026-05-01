@@ -12,6 +12,7 @@ public:
   bool readDp(uint8_t address, uint32_t &value, String &error);
   bool writeDp(uint8_t address, uint32_t value, String &error);
   bool readAp(uint8_t address, uint32_t &value, String &error);
+  bool readApBlock(uint8_t address, uint32_t *values, size_t count, String &error);
   bool writeAp(uint8_t address, uint32_t value, String &error);
   bool powerUpDebug(String &error);
   bool clearStickyErrors(String &error);

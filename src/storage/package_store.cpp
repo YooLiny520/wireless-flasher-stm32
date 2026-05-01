@@ -92,72 +92,6 @@ bool PackageStore::removePackage(String &error) {
   return true;
 }
 
-bool PackageStore::saveManifestJson(const uint8_t *data, size_t length, bool reset, String &error) {
-  if (!data || length == 0) {
-    error = "Manifest is empty";
-    return false;
-  }
-
-  FlashManifest manifest;
-  String json(reinterpret_cast<const char *>(data), length);
-  if (!parseManifest(json, manifest, error)) {
-    return false;
-  }
-
-  if (reset && LittleFS.exists(AppConfig::kManifestTempPath) && !LittleFS.remove(AppConfig::kManifestTempPath)) {
-    error = "Failed to reset manifest upload";
-    return false;
-  }
-  if (!ensureFreeSpace(length, error)) {
-    return false;
-  }
-
-  File file = LittleFS.open(AppConfig::kManifestTempPath, FILE_APPEND);
-  if (!file) {
-    error = "Failed to open manifest file";
-    return false;
-  }
-
-  if (file.write(data, length) != length) {
-    file.close();
-    error = "Failed to write manifest file";
-    return false;
-  }
-
-  file.close();
-  return true;
-}
-
-bool PackageStore::appendFirmwareChunk(const uint8_t *data, size_t length, bool reset, String &error) {
-  if (!data || length == 0) {
-    error = "Firmware chunk is empty";
-    return false;
-  }
-
-  if (reset && LittleFS.exists(AppConfig::kFirmwareTempPath) && !LittleFS.remove(AppConfig::kFirmwareTempPath)) {
-    error = "Failed to reset firmware upload";
-    return false;
-  }
-  if (!ensureFreeSpace(length, error)) {
-    return false;
-  }
-
-  File file = LittleFS.open(AppConfig::kFirmwareTempPath, FILE_APPEND);
-  if (!file) {
-    error = "Failed to open firmware file";
-    return false;
-  }
-
-  if (file.write(data, length) != length) {
-    file.close();
-    error = "Failed to append firmware chunk";
-    return false;
-  }
-
-  file.close();
-  return true;
-}
-
 bool PackageStore::appendIntelHexChunk(const uint8_t *data, size_t length, bool reset, String &error) {
   if (!data || length == 0) {
     error = "Intel HEX chunk is empty";
@@ -261,7 +195,9 @@ bool PackageStore::finalizePackage(String &error) {
   }
 
   if (manifest.crc32 != crc32) {
-    error = "Firmware checksum does not match manifest";
+    error = "Firmware checksum does not match manifest: expected 0x" + String(manifest.crc32, HEX) +
+            ", actual 0x" + String(crc32, HEX) + ", size " + String(size) + " bytes";
+    error.toUpperCase();
     return false;
   }
 
@@ -343,6 +279,27 @@ bool PackageStore::listSavedPackages(JsonArray array, String &error) const {
   return true;
 }
 
+bool PackageStore::listSavedPackages(std::vector<SavedPackageInfo> &packages, String &error) const {
+  packages.clear();
+  JsonDocument index;
+  if (!loadSavedIndex(index, error)) {
+    return false;
+  }
+
+  JsonArray savedPackages = index["packages"].as<JsonArray>();
+  for (JsonObject package : savedPackages) {
+    SavedPackageInfo info;
+    info.id = package["id"] | "";
+    info.name = package["name"] | "";
+    info.chip = package["chip"] | "";
+    info.address = package["address"] | 0;
+    info.size = package["size"] | 0;
+    info.crc32 = package["crc32"] | 0;
+    packages.push_back(info);
+  }
+  return true;
+}
+
 String PackageStore::selectedSavedPackageId(String &error) const {
   JsonDocument index;
   if (!loadSavedIndex(index, error)) {
@@ -365,7 +322,7 @@ bool PackageStore::clearSelectedSavedPackage(String &error) {
   return setSelectedSavedPackageId("", error);
 }
 
-bool PackageStore::saveActivePackage(const String &name, SavedPackageInfo &info, String &error) {
+bool PackageStore::saveActivePackage(const String &name, SavedPackageInfo &info, String &error, const String &replaceId) {
   if (!hasPackage()) {
     error = "No active firmware package to save";
     return false;
@@ -409,23 +366,12 @@ bool PackageStore::saveActivePackage(const String &name, SavedPackageInfo &info,
     return false;
   }
 
-  if (!ensureFreeSpace(manifestSize + firmwareSize, error)) {
+  if (replaceId.isEmpty() && !ensureFreeSpace(manifestSize + firmwareSize, error)) {
     return false;
   }
 
   JsonDocument index;
   if (!loadSavedIndex(index, error)) {
-    return false;
-  }
-
-  const String id = generatePackageId();
-  const String manifestPath = savedManifestPath(id);
-  const String firmwarePath = savedFirmwarePath(id);
-  if (!copyFile(AppConfig::kManifestPath, manifestPath.c_str(), error)) {
-    return false;
-  }
-  if (!copyFile(AppConfig::kFirmwarePath, firmwarePath.c_str(), error)) {
-    LittleFS.remove(manifestPath);
     return false;
   }
 
@@ -437,14 +383,61 @@ bool PackageStore::saveActivePackage(const String &name, SavedPackageInfo &info,
   }
 
   JsonArray packages = index["packages"].as<JsonArray>();
-  JsonObject item = packages.add<JsonObject>();
-  item["id"] = id;
+  JsonObject item;
+  String id = replaceId;
+  if (!id.isEmpty()) {
+    for (JsonObject package : packages) {
+      if (String(package["id"] | "") == id) {
+        item = package;
+        break;
+      }
+    }
+    if (item.isNull()) {
+      error = "Saved package was not found";
+      return false;
+    }
+  } else {
+    String uniqueName = displayName;
+    for (int suffix = 1;; ++suffix) {
+      bool exists = false;
+      for (JsonObject package : packages) {
+        if (String(package["name"] | "") == uniqueName) {
+          exists = true;
+          break;
+        }
+      }
+      if (!exists) {
+        displayName = uniqueName;
+        break;
+      }
+      uniqueName = displayName + " (" + String(suffix + 1) + ")";
+    }
+    id = generatePackageId();
+    item = packages.add<JsonObject>();
+    item["id"] = id;
+    item["createdMs"] = millis();
+  }
+
+  const String manifestPath = savedManifestPath(id);
+  const String firmwarePath = savedFirmwarePath(id);
+  if (!id.isEmpty() && replaceId.length()) {
+    LittleFS.remove(manifestPath);
+    LittleFS.remove(firmwarePath);
+  }
+  if (!copyFile(AppConfig::kManifestPath, manifestPath.c_str(), error)) {
+    return false;
+  }
+  if (!copyFile(AppConfig::kFirmwarePath, firmwarePath.c_str(), error)) {
+    LittleFS.remove(manifestPath);
+    return false;
+  }
+
   item["name"] = displayName;
   item["chip"] = manifest.chip;
   item["address"] = manifest.address;
   item["size"] = manifest.size;
   item["crc32"] = manifest.crc32;
-  item["createdMs"] = millis();
+  item["updatedMs"] = millis();
 
   if (!saveSavedIndex(index, error)) {
     LittleFS.remove(manifestPath);
@@ -596,9 +589,9 @@ bool PackageStore::parseManifest(const String &json, FlashManifest &manifest, St
 
   manifest.target = doc["target"] | "";
   manifest.chip = doc["chip"] | "";
-  manifest.address = doc["address"] | AppConfig::kDefaultFlashAddress;
-  manifest.size = doc["size"] | 0;
-  manifest.crc32 = doc["crc32"] | 0;
+  manifest.address = doc["address"].as<uint32_t>() ? doc["address"].as<uint32_t>() : AppConfig::kDefaultFlashAddress;
+  manifest.size = doc["size"].as<size_t>();
+  manifest.crc32 = doc["crc32"].as<uint32_t>();
 
   if (manifest.target != "stm32") {
     error = "Manifest target must be stm32";
@@ -860,7 +853,7 @@ bool PackageStore::convertIntelHexToBinary(FlashManifest &manifest, String &erro
     return false;
   }
   manifest.target = "stm32";
-  manifest.chip = AppConfig::kExampleTargetChip;
+  manifest.chip = "STM32";
   manifest.address = minAddress;
   manifest.size = binarySize;
   manifest.crc32 = crc32;

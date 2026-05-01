@@ -39,14 +39,9 @@
       </div>
       <div class="card">
         <h2>上传固件包</h2>
-        <p class="muted">推荐：直接上传 Intel HEX 文件，不需要 manifest.json。</p>
+        <p class="muted">上传 Intel HEX 文件，设备会自动解析地址并生成烧录包。</p>
         <label>Intel HEX</label>
-        <input id="hexFile" type="file" />
-        <p class="muted">旧格式备用：同时选择 manifest.json 和 app.bin。</p>
-        <label>manifest.json</label>
-        <input id="manifestFile" type="file" accept="application/json,.json" />
-        <label>app.bin</label>
-        <input id="firmwareFile" type="file" accept=".bin,application/octet-stream" />
+        <input id="hexFile" type="file" accept=".hex,.ihx" />
         <div class="row">
           <button id="uploadButton" onclick="document.getElementById('uploadLog').textContent='按钮已点击，内置页面事件已触发。';">上传并校验</button>
           <button id="deleteButton" class="secondary">删除当前固件包</button>
@@ -71,18 +66,9 @@
         <pre id="savedPackageLog">等待操作。</pre>
       </div>
       <div class="card">
-        <h2>manifest 示例</h2>
-        <pre id="manifestExample">正在加载示例...</pre>
-      </div>
-      <div class="card">
         <h2>开始烧录</h2>
         <label>烧录固件</label>
         <select id="flashPackageSelect"></select>
-        <label>烧录接口</label>
-        <select id="transportSelect" disabled>
-          <option value="swd" selected>SWD (STM32F1)</option>
-        </select>
-        <input id="modeSelect" type="hidden" value="manual" />
         <p id="flashHint" class="muted">当前只保留 SWD：请连接 SWDIO11 / SWCLK12 / GND，不接 NRST。</p>
         <div class="row">
           <button id="flashButton">开始烧录</button>

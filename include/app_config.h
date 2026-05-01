@@ -8,11 +8,6 @@ static constexpr const char *kAccessPointPassword = "12345678";
 inline IPAddress accessPointIp() { return IPAddress(192, 168, 4, 1); }
 inline IPAddress gatewayIp() { return IPAddress(192, 168, 4, 1); }
 inline IPAddress subnetMask() { return IPAddress(255, 255, 255, 0); }
-static constexpr uint32_t kTargetBaudRate = 115200;
-static constexpr int kTargetUartRxPin = 12;
-static constexpr int kTargetUartTxPin = 13;
-static constexpr int kTargetBoot0Pin = -1;
-static constexpr int kTargetResetPin = -1;
 static constexpr int kSwdIoPin = 11;
 static constexpr int kSwdClockPin = 12;
 static constexpr int kSwdResetPin = -1;
@@ -28,8 +23,10 @@ static constexpr int kTouchResetPin = 16;
 static constexpr int kTouchSdaPin = 18;
 static constexpr int kTouchSclPin = 21;
 static constexpr int kTouchInterruptPin = -1;
+static constexpr int kKeyRightPin = 38;
+static constexpr int kKeyLeftPin = 39;
+static constexpr int kKeyPushPin = 40;
 static constexpr const char *kExampleTargetChip = "stm32f103c8";
-static constexpr const char *kRecommendedWiringSummary = "UART: GND + RX12/TX13";
 static constexpr const char *kRecommendedSwdWiringSummary = "SWD: GND + SWDIO11 + SWCLK12, no NRST";
 static constexpr uint32_t kDefaultFlashAddress = 0x08000000UL;
 static constexpr uint32_t kStm32F1FlashStart = 0x08000000UL;

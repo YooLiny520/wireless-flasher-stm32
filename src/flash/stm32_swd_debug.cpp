@@ -65,24 +65,49 @@ bool Stm32SwdDebug::readMemory32Block(uint32_t address, uint8_t *data, size_t le
     error = "MEM-AP word block reads require alignment";
     return false;
   }
+  if (length == 0) {
+    return true;
+  }
   if (!writeApRegister(kApCsw, kCswWord, error)) {
     return false;
   }
-  if (!writeApRegister(kApTar, address, error)) {
-    return false;
-  }
-  if (!selectApBank(kApDrw >> 4, error)) {
-    return false;
-  }
-  for (size_t offset = 0; offset < length; offset += 4) {
-    uint32_t value = 0;
-    if (!transport_.readAp(kApDrw & 0x0C, value, error)) {
+
+  constexpr size_t kReadBatchWords = 128;
+  uint32_t words[kReadBatchWords];
+  size_t offset = 0;
+  while (offset < length) {
+    const uint32_t currentAddress = address + offset;
+    size_t segmentBytes = min(length - offset, static_cast<size_t>(1024 - (currentAddress & 0x3FFU)));
+    segmentBytes &= ~static_cast<size_t>(0x3U);
+    if (segmentBytes == 0) {
+      error = "MEM-AP word block segment is empty";
       return false;
     }
-    data[offset] = static_cast<uint8_t>(value & 0xFFU);
-    data[offset + 1] = static_cast<uint8_t>((value >> 8) & 0xFFU);
-    data[offset + 2] = static_cast<uint8_t>((value >> 16) & 0xFFU);
-    data[offset + 3] = static_cast<uint8_t>((value >> 24) & 0xFFU);
+    if (!writeApRegister(kApTar, currentAddress, error)) {
+      return false;
+    }
+    if (!selectApBank(kApDrw >> 4, error)) {
+      return false;
+    }
+
+    size_t segmentOffset = 0;
+    while (segmentOffset < segmentBytes) {
+      const size_t remainingWords = (segmentBytes - segmentOffset) / 4;
+      const size_t batchWords = min(kReadBatchWords, remainingWords);
+      if (!transport_.readApBlock(kApDrw & 0x0C, words, batchWords, error)) {
+        return false;
+      }
+      for (size_t index = 0; index < batchWords; ++index) {
+        const uint32_t value = words[index];
+        const size_t dataOffset = offset + segmentOffset + index * 4;
+        data[dataOffset] = static_cast<uint8_t>(value & 0xFFU);
+        data[dataOffset + 1] = static_cast<uint8_t>((value >> 8) & 0xFFU);
+        data[dataOffset + 2] = static_cast<uint8_t>((value >> 16) & 0xFFU);
+        data[dataOffset + 3] = static_cast<uint8_t>((value >> 24) & 0xFFU);
+      }
+      segmentOffset += batchWords * 4;
+    }
+    offset += segmentBytes;
   }
   return true;
 }
@@ -141,7 +166,7 @@ bool Stm32SwdDebug::run(String &error) {
 }
 
 bool Stm32SwdDebug::reset(String &error) {
-  targetControl_.resetTarget(ResetKind::Swd);
+  targetControl_.resetTarget();
   return writeMemory32(kAircr, 0x05FA0004, error);
 }
 

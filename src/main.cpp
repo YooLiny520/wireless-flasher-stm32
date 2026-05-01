@@ -3,51 +3,103 @@
 
 #include "flash_manager.h"
 #include "package_store.h"
-#include "stm32_flasher.h"
 #include "stm32_swd_debug.h"
 #include "stm32f1_flash.h"
 #include "stm32f1_swd_backend.h"
 #include "target_control.h"
-#include "uart_boot_backend.h"
 #include "hal/swd_transport.h"
 #include "ap_manager.h"
 #include "display/display_manager.h"
+#include "input/input_manager.h"
 #include "web_server.h"
 
 namespace {
 Preferences preferences;
 PackageStore packageStore;
-TargetControl targetControl(Serial1);
-Stm32Flasher stm32Flasher;
+TargetControl targetControl;
 SwdTransport swdTransport(AppConfig::kSwdIoPin, AppConfig::kSwdClockPin);
 Stm32SwdDebug stm32SwdDebug(swdTransport, targetControl);
 Stm32F1Flash stm32F1Flash(stm32SwdDebug);
-UartBootBackend uartBootBackend(targetControl.serial(), stm32Flasher);
 Stm32F1SwdBackend stm32F1SwdBackend(targetControl, swdTransport, stm32SwdDebug, stm32F1Flash);
-FlashManager flashManager(packageStore, targetControl, uartBootBackend, stm32F1SwdBackend, preferences);
+FlashManager flashManager(packageStore, targetControl, stm32F1SwdBackend, preferences);
 AccessPointManager accessPointManager;
 DisplayManager displayManager;
+InputManager inputManager(packageStore, flashManager);
 AppWebServer webServer(accessPointManager, packageStore, flashManager, targetControl, stm32SwdDebug, stm32F1Flash);
+uint32_t lastChipProbeMs = 0;
+uint32_t lastDetectedChipId = 0;
+
+void flashAction(void *context) {
+  static_cast<InputManager *>(context)->flashSelectedPackage();
+}
+
+void nextAction(void *context) {
+  static_cast<InputManager *>(context)->selectNextPackage();
+}
+
+void previousAction(void *context) {
+  static_cast<InputManager *>(context)->selectPreviousPackage();
+}
+
+void updateDetectedChip() {
+  if (flashManager.isBusy()) {
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (now - lastChipProbeMs < 2000) {
+    return;
+  }
+  lastChipProbeMs = now;
+
+  String error;
+  if (!targetControl.prepareForSwd(error) || !stm32SwdDebug.connect(error)) {
+    if (lastDetectedChipId != 0) {
+      lastDetectedChipId = 0;
+      flashManager.clearDetectedChip();
+    }
+    return;
+  }
+
+  uint32_t dbgmcuIdcode = 0;
+  if (!stm32F1Flash.readChipId(dbgmcuIdcode, error)) {
+    if (lastDetectedChipId != 0) {
+      lastDetectedChipId = 0;
+      flashManager.clearDetectedChip();
+    }
+    return;
+  }
+
+  const uint32_t chipId = dbgmcuIdcode & 0x0FFFU;
+  if (chipId != lastDetectedChipId || !flashManager.status().detectedChip.length()) {
+    lastDetectedChipId = chipId;
+    flashManager.setDetectedChip(chipId);
+  }
+}
 
 DisplaySnapshot makeDisplaySnapshot() {
   FlashStatus status = flashManager.status();
   DisplaySnapshot snapshot;
-  snapshot.ssid = accessPointManager.ssid();
-  snapshot.ipAddress = accessPointManager.ipAddress();
   snapshot.stateLabel = status.stateLabel;
   snapshot.message = status.message;
-  snapshot.transport = status.transport;
-  snapshot.targetMode = status.targetMode;
+  snapshot.log = status.log;
   snapshot.targetChip = status.targetChip;
   snapshot.detectedChip = status.detectedChip;
-  snapshot.wiringSummary = status.transport == "swd" ? AppConfig::kRecommendedSwdWiringSummary : AppConfig::kRecommendedWiringSummary;
+  snapshot.selectedPackageName = inputManager.selectedPackageName();
+  snapshot.selectedPackageId = inputManager.selectedPackageId();
+  snapshot.selectedPackageChip = inputManager.selectedPackageChip();
+  snapshot.selectedPackageAddress = inputManager.selectedPackageAddress();
+  snapshot.selectedPackageCrc32 = inputManager.selectedPackageCrc32();
+  snapshot.selectedPackageSize = inputManager.selectedPackageSize();
+  snapshot.selectedPackageIndex = inputManager.selectedPackageIndex();
+  snapshot.savedPackageCount = inputManager.savedPackageCount();
+  snapshot.uiMessage = inputManager.uiMessage();
   snapshot.targetAddress = status.targetAddress;
   snapshot.firmwareCrc32 = status.firmwareCrc32;
   snapshot.bytesWritten = status.bytesWritten;
   snapshot.totalBytes = status.totalBytes;
-  snapshot.targetBaudRate = AppConfig::kTargetBaudRate;
-  snapshot.automaticAvailable = status.automaticAvailable;
   snapshot.packageReady = status.packageReady;
+  snapshot.flashBusy = flashManager.isBusy();
   return snapshot;
 }
 }
@@ -75,11 +127,17 @@ void setup() {
 
   flashManager.begin();
   displayManager.begin();
+  displayManager.onFlash(flashAction, &inputManager);
+  displayManager.onNext(nextAction, &inputManager);
+  displayManager.onPrevious(previousAction, &inputManager);
+  inputManager.begin();
   webServer.begin();
 }
 
 void loop() {
   webServer.handleClient();
+  inputManager.update();
+  updateDetectedChip();
   displayManager.update(makeDisplaySnapshot());
   delay(2);
 }

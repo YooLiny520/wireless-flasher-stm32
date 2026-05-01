@@ -14,10 +14,6 @@ Stm32F1SwdBackend::Stm32F1SwdBackend(TargetControl &targetControl,
                                      Stm32F1Flash &flash)
     : targetControl_(targetControl), transport_(transport), debug_(debug), flash_(flash) {}
 
-FlashTransport Stm32F1SwdBackend::transport() const {
-  return FlashTransport::Swd;
-}
-
 const char *Stm32F1SwdBackend::transportName() const {
   return "swd";
 }

@@ -101,6 +101,39 @@ bool SwdTransport::readAp(uint8_t address, uint32_t &value, String &error) {
   return false;
 }
 
+bool SwdTransport::readApBlock(uint8_t address, uint32_t *values, size_t count, String &error) {
+  if (count == 0) {
+    return true;
+  }
+
+  auto readPosted = [&](uint32_t &postedValue) -> bool {
+    for (int attempt = 0; attempt < 50; ++attempt) {
+      uint8_t ack = transfer(makeRequest(true, true, address), &postedValue, true, error);
+      if (ack == kAckOk) {
+        return true;
+      }
+      if (ack != kAckWait) {
+        return false;
+      }
+      delayMicroseconds(50);
+    }
+    error = "SWD AP block read WAIT timeout";
+    return false;
+  };
+
+  uint32_t postedValue = 0;
+  if (!readPosted(postedValue)) {
+    return false;
+  }
+  for (size_t index = 0; index + 1 < count; ++index) {
+    if (!readPosted(postedValue)) {
+      return false;
+    }
+    values[index] = postedValue;
+  }
+  return readDp(kDpRdbuff, values[count - 1], error);
+}
+
 bool SwdTransport::writeAp(uint8_t address, uint32_t value, String &error) {
   for (int attempt = 0; attempt < 50; ++attempt) {
     uint32_t data = value;

@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
+#include <vector>
 #include "flash_manifest.h"
 
 struct SavedPackageInfo {
@@ -19,16 +20,15 @@ public:
   bool begin();
   bool hasPackage() const;
   bool removePackage(String &error);
-  bool saveManifestJson(const uint8_t *data, size_t length, bool reset, String &error);
-  bool appendFirmwareChunk(const uint8_t *data, size_t length, bool reset, String &error);
   bool appendIntelHexChunk(const uint8_t *data, size_t length, bool reset, String &error);
   bool finalizeIntelHexPackage(String &error);
   bool finalizePackage(String &error);
   bool loadManifest(FlashManifest &manifest, String &error) const;
   bool listSavedPackages(JsonArray array, String &error) const;
+  bool listSavedPackages(std::vector<SavedPackageInfo> &packages, String &error) const;
   String selectedSavedPackageId(String &error) const;
   bool clearSelectedSavedPackage(String &error);
-  bool saveActivePackage(const String &name, SavedPackageInfo &info, String &error);
+  bool saveActivePackage(const String &name, SavedPackageInfo &info, String &error, const String &replaceId = "");
   bool restoreSavedPackage(const String &id, String &error);
   bool removeSavedPackage(const String &id, String &error);
   String firmwarePath() const;

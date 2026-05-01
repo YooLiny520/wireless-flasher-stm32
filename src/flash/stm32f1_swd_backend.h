@@ -14,7 +14,6 @@ public:
                     Stm32SwdDebug &debug,
                     Stm32F1Flash &flash);
 
-  FlashTransport transport() const override;
   const char *transportName() const override;
   bool flash(const FlashManifest &manifest,
              fs::FS &fs,

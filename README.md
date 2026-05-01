@@ -7,8 +7,7 @@ ESP32-S3 based wireless STM32F1 firmware flasher. The device creates a Wi-Fi acc
 - ESP32-S3 Wi-Fi AP with embedded web interface
 - STM32F1 flashing over SWD
 - Default wiring uses only SWDIO, SWCLK, and GND; NRST is not required
-- Intel HEX upload with automatic address parsing and binary conversion
-- Legacy `manifest.json` + `app.bin` upload support
+- Intel HEX upload with automatic address parsing and internal binary conversion
 - Firmware package validation with size and CRC32 checks
 - Saved firmware package list stored in LittleFS
 - Persistent flash firmware selection after reboot
@@ -31,31 +30,14 @@ Do not connect NRST for the default workflow.
 1. Power on the ESP32-S3 flasher.
 2. Connect to the ESP32 access point.
 3. Open the web UI shown by the device.
-4. Upload an Intel HEX firmware file, or upload `manifest.json` and `app.bin` together.
+4. Upload an Intel HEX firmware file.
 5. Optionally save the validated firmware to the saved package list.
 6. Select the firmware to flash in the **Start Flashing** section.
 7. Click start flashing and wait for program and verify to finish.
 
-## Firmware package formats
+## Firmware package format
 
-### Intel HEX
-
-Recommended format. HEX files contain address records and checksums, so the flasher can infer the target flash address and generate the internal binary package automatically.
-
-### manifest.json + app.bin
-
-Legacy format. The manifest describes the target chip, address, size, and CRC32 for the raw binary.
-
-Example manifest:
-
-```json
-{
-  "target": "stm32f103",
-  "address": 134217728,
-  "size": 21028,
-  "crc32": 1234567890
-}
-```
+Upload Intel HEX files through the web UI. HEX files contain address records and checksums, so the flasher can infer the target flash address and generate the internal binary package automatically.
 
 ## Build
 
@@ -111,7 +93,6 @@ esptool.py --chip esp32s3 --baud 460800 write_flash \
 - `src/network/` - Wi-Fi AP setup
 - `src/display/` - optional display status output
 - `data/` - static web UI mirror
-- `tools/` - firmware manifest helper scripts
 - `boards/` - custom ESP32-S3 board definition
 
 ## Notes

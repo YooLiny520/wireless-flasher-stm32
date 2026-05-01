@@ -34,8 +34,6 @@ private:
   void handleIndex();
   void handleInfo();
   void handleStatus();
-  void handleManifestExample();
-  void handleUploadFinalize();
   void handleHexUploadFinalize();
   void handlePackages();
   void handleSavePackage();

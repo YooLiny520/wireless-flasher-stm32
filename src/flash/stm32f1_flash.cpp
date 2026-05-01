@@ -67,7 +67,7 @@ bool Stm32F1Flash::programHalfWords(uint32_t address, const uint8_t *data, size_
 }
 
 bool Stm32F1Flash::verify(uint32_t address, const uint8_t *data, size_t length, String &error) {
-  constexpr size_t kVerifyChunkSize = 1024;
+  constexpr size_t kVerifyChunkSize = 2048;
   uint8_t verifyBuffer[kVerifyChunkSize];
   size_t offset = 0;
   for (; offset + kVerifyChunkSize <= length; offset += kVerifyChunkSize) {
@@ -79,7 +79,20 @@ bool Stm32F1Flash::verify(uint32_t address, const uint8_t *data, size_t length, 
       return false;
     }
   }
-  for (; offset < length; offset += 4) {
+
+  const size_t alignedTailLength = (length - offset) & ~static_cast<size_t>(0x3U);
+  if (alignedTailLength > 0) {
+    if (!debug_.readMemory32Block(address + offset, verifyBuffer, alignedTailLength, error)) {
+      return false;
+    }
+    if (memcmp(verifyBuffer, data + offset, alignedTailLength) != 0) {
+      error = "Flash verification failed";
+      return false;
+    }
+    offset += alignedTailLength;
+  }
+
+  if (offset < length) {
     uint32_t expected = 0xFFFFFFFFUL;
     for (size_t i = 0; i < 4 && offset + i < length; ++i) {
       expected &= ~(0xFFUL << (i * 8));
