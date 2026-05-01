@@ -4,9 +4,11 @@
 #include <Preferences.h>
 #include "flash_backend.h"
 #include "flash_manifest.h"
+#include "stm32_chip_info.h"
 
 class PackageStore;
 class TargetControl;
+class Stm32SwdDebug;
 
 class FlashBackend;
 
@@ -31,6 +33,8 @@ struct FlashStatus {
   String log = "Ready";
   String targetChip = "";
   String detectedChip = "";
+  String flashBackend = "";
+  uint32_t detectedChipId = 0;
   uint32_t targetAddress = 0;
   uint32_t firmwareCrc32 = 0;
   size_t bytesWritten = 0;
@@ -42,7 +46,11 @@ class FlashManager {
 public:
   FlashManager(PackageStore &packageStore,
                TargetControl &targetControl,
-               FlashBackend &swdBackend,
+               Stm32SwdDebug &debug,
+               FlashBackend &f1Backend,
+               FlashBackend &f4Backend,
+               FlashBackend &f7Backend,
+               FlashBackend &h7Backend,
                Preferences &preferences);
 
   void begin();
@@ -59,7 +67,11 @@ public:
 private:
   PackageStore &packageStore_;
   TargetControl &targetControl_;
-  FlashBackend &swdBackend_;
+  Stm32SwdDebug &debug_;
+  FlashBackend &f1Backend_;
+  FlashBackend &f4Backend_;
+  FlashBackend &f7Backend_;
+  FlashBackend &h7Backend_;
   Preferences &preferences_;
   portMUX_TYPE mutex_ = portMUX_INITIALIZER_UNLOCKED;
   TaskHandle_t taskHandle_ = nullptr;
@@ -71,7 +83,7 @@ private:
   void workerLoop();
   bool flashProgress(size_t bytesWritten, size_t totalBytes, const char *message);
   void updateDetectedChip(uint32_t chipId);
-  String chipName(uint32_t chipId) const;
+  FlashBackend *backendForFamily(Stm32Family family);
   void setState(FlashState state, const String &message);
   const char *stateName(FlashState state) const;
 };

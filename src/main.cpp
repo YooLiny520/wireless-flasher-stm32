@@ -6,6 +6,10 @@
 #include "stm32_swd_debug.h"
 #include "stm32f1_flash.h"
 #include "stm32f1_swd_backend.h"
+#include "stm32f4_flash.h"
+#include "stm32fx_swd_backend.h"
+#include "stm32h7_flash.h"
+#include "stm32h7_swd_backend.h"
 #include "target_control.h"
 #include "hal/swd_transport.h"
 #include "ap_manager.h"
@@ -20,12 +24,17 @@ TargetControl targetControl;
 SwdTransport swdTransport(AppConfig::kSwdIoPin, AppConfig::kSwdClockPin);
 Stm32SwdDebug stm32SwdDebug(swdTransport, targetControl);
 Stm32F1Flash stm32F1Flash(stm32SwdDebug);
+Stm32F4Flash stm32F4Flash(stm32SwdDebug);
+Stm32H7Flash stm32H7Flash(stm32SwdDebug);
 Stm32F1SwdBackend stm32F1SwdBackend(targetControl, swdTransport, stm32SwdDebug, stm32F1Flash);
-FlashManager flashManager(packageStore, targetControl, stm32F1SwdBackend, preferences);
+Stm32FxSwdBackend stm32F4SwdBackend(targetControl, swdTransport, stm32SwdDebug, stm32F4Flash, Stm32Family::F4);
+Stm32FxSwdBackend stm32F7SwdBackend(targetControl, swdTransport, stm32SwdDebug, stm32F4Flash, Stm32Family::F7);
+Stm32H7SwdBackend stm32H7SwdBackend(targetControl, swdTransport, stm32SwdDebug, stm32H7Flash);
+FlashManager flashManager(packageStore, targetControl, stm32SwdDebug, stm32F1SwdBackend, stm32F4SwdBackend, stm32F7SwdBackend, stm32H7SwdBackend, preferences);
 AccessPointManager accessPointManager;
 DisplayManager displayManager;
 InputManager inputManager(packageStore, flashManager);
-AppWebServer webServer(accessPointManager, packageStore, flashManager, targetControl, stm32SwdDebug, stm32F1Flash);
+AppWebServer webServer(accessPointManager, packageStore, flashManager, targetControl, stm32SwdDebug);
 uint32_t lastChipProbeMs = 0;
 uint32_t lastDetectedChipId = 0;
 
@@ -62,7 +71,7 @@ void updateDetectedChip() {
   }
 
   uint32_t dbgmcuIdcode = 0;
-  if (!stm32F1Flash.readChipId(dbgmcuIdcode, error)) {
+  if (!stm32SwdDebug.readStm32DebugId(dbgmcuIdcode, error)) {
     if (lastDetectedChipId != 0) {
       lastDetectedChipId = 0;
       flashManager.clearDetectedChip();
@@ -85,6 +94,7 @@ DisplaySnapshot makeDisplaySnapshot() {
   snapshot.log = status.log;
   snapshot.targetChip = status.targetChip;
   snapshot.detectedChip = status.detectedChip;
+  snapshot.flashBackend = status.flashBackend;
   snapshot.selectedPackageName = inputManager.selectedPackageName();
   snapshot.selectedPackageId = inputManager.selectedPackageId();
   snapshot.selectedPackageChip = inputManager.selectedPackageChip();

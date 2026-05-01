@@ -12,9 +12,11 @@ public:
   bool connect(String &error);
   void sampleLineLevels(String &message);
   bool readDebugPortId(uint32_t &idcode, String &error);
+  bool readStm32DebugId(uint32_t &idcode, String &error);
   bool readMemory32(uint32_t address, uint32_t &value, String &error);
   bool readMemory32Block(uint32_t address, uint8_t *data, size_t length, String &error);
   bool writeMemory32(uint32_t address, uint32_t value, String &error);
+  bool writeMemory32Block(uint32_t address, const uint8_t *data, size_t length, String &error);
   bool writeMemory16(uint32_t address, uint16_t value, String &error);
   bool writeMemory16Block(uint32_t address, const uint8_t *data, size_t length, String &error);
   bool halt(String &error);

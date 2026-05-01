@@ -163,6 +163,7 @@ void DisplayManager::onPrevious(ActionCallback callback, void *context) {
 bool DisplayManager::shouldUpdateWidgets(const DisplaySnapshot &snapshot) const {
   return snapshot.stateLabel != lastSnapshot_.stateLabel || snapshot.message != lastSnapshot_.message ||
          snapshot.targetChip != lastSnapshot_.targetChip || snapshot.detectedChip != lastSnapshot_.detectedChip ||
+         snapshot.flashBackend != lastSnapshot_.flashBackend ||
          snapshot.selectedPackageName != lastSnapshot_.selectedPackageName ||
          snapshot.selectedPackageId != lastSnapshot_.selectedPackageId ||
          snapshot.selectedPackageChip != lastSnapshot_.selectedPackageChip ||
@@ -389,7 +390,12 @@ String DisplayManager::packageInfoText(const DisplaySnapshot &snapshot) const {
   text += chip;
   text += "  ";
   text += String(size);
-  text += "B\n";
+  text += "B";
+  if (snapshot.flashBackend.length()) {
+    text += "  ";
+    text += snapshot.flashBackend;
+  }
+  text += "\n";
   text += formatHex(address, 8);
   text += "  CRC ";
   text += formatHex(crc, 8);

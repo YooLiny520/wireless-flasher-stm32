@@ -9,6 +9,7 @@ struct DisplaySnapshot {
   String message;
   String targetChip;
   String detectedChip;
+  String flashBackend;
   String selectedPackageName;
   String selectedPackageId;
   String selectedPackageChip;

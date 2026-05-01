@@ -686,8 +686,8 @@ bool PackageStore::scanIntelHex(uint32_t &minAddress, uint32_t &maxAddressExclus
         file.close();
         return false;
       }
-      if (start < AppConfig::kStm32F1FlashStart || end > AppConfig::kStm32F1FlashEnd) {
-        error = "Intel HEX data is outside STM32F1 flash range";
+      if (start < AppConfig::kDefaultFlashAddress) {
+        error = "Intel HEX data is outside STM32 internal flash address range";
         file.close();
         return false;
       }
@@ -756,8 +756,8 @@ bool PackageStore::convertIntelHexToBinary(FlashManifest &manifest, String &erro
     error = "Intel HEX converted firmware size is invalid";
     return false;
   }
-  if (minAddress + binarySize < minAddress || minAddress + binarySize > AppConfig::kStm32F1FlashEnd) {
-    error = "Intel HEX converted firmware exceeds STM32F1 flash range";
+  if (minAddress + binarySize < minAddress) {
+    error = "Intel HEX converted firmware address overflows";
     return false;
   }
 

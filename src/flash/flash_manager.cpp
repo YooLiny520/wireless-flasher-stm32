@@ -4,6 +4,7 @@
 #include "app_config.h"
 #include "hal/target_control.h"
 #include "package_store.h"
+#include "stm32_swd_debug.h"
 
 namespace {
 constexpr const char *kPrefsNamespace = "flasher";
@@ -31,9 +32,20 @@ FlashState progressStateForMessage(const char *message, size_t bytesWritten, siz
 
 FlashManager::FlashManager(PackageStore &packageStore,
                            TargetControl &targetControl,
-                           FlashBackend &swdBackend,
+                           Stm32SwdDebug &debug,
+                           FlashBackend &f1Backend,
+                           FlashBackend &f4Backend,
+                           FlashBackend &f7Backend,
+                           FlashBackend &h7Backend,
                            Preferences &preferences)
-    : packageStore_(packageStore), targetControl_(targetControl), swdBackend_(swdBackend), preferences_(preferences) {}
+    : packageStore_(packageStore),
+      targetControl_(targetControl),
+      debug_(debug),
+      f1Backend_(f1Backend),
+      f4Backend_(f4Backend),
+      f7Backend_(f7Backend),
+      h7Backend_(h7Backend),
+      preferences_(preferences) {}
 
 void FlashManager::begin() {
   preferences_.begin(kPrefsNamespace, false);
@@ -45,6 +57,8 @@ void FlashManager::begin() {
       portENTER_CRITICAL(&mutex_);
       status_.targetChip = manifest.chip;
       status_.detectedChip = "";
+      status_.detectedChipId = 0;
+      status_.flashBackend = "";
       status_.targetAddress = manifest.address;
       status_.firmwareCrc32 = manifest.crc32;
       status_.totalBytes = manifest.size;
@@ -86,7 +100,6 @@ bool FlashManager::setPackageReady(String &error) {
   portENTER_CRITICAL(&mutex_);
   status_.packageReady = true;
   status_.targetChip = manifest.chip;
-  status_.detectedChip = "";
   status_.targetAddress = manifest.address;
   status_.firmwareCrc32 = manifest.crc32;
   status_.bytesWritten = 0;
@@ -120,6 +133,8 @@ void FlashManager::clearPackageState() {
   status_.packageReady = false;
   status_.targetChip = "";
   status_.detectedChip = "";
+  status_.detectedChipId = 0;
+  status_.flashBackend = "";
   status_.targetAddress = 0;
   status_.firmwareCrc32 = 0;
   status_.bytesWritten = 0;
@@ -139,6 +154,8 @@ void FlashManager::setDetectedChip(uint32_t chipId) {
 void FlashManager::clearDetectedChip() {
   portENTER_CRITICAL(&mutex_);
   status_.detectedChip = "";
+  status_.detectedChipId = 0;
+  status_.flashBackend = "";
   portEXIT_CRITICAL(&mutex_);
 }
 
@@ -165,7 +182,6 @@ void FlashManager::workerLoop() {
 
     portENTER_CRITICAL(&mutex_);
     status_.targetChip = manifest.chip;
-    status_.detectedChip = "";
     status_.targetAddress = manifest.address;
     status_.firmwareCrc32 = manifest.crc32;
     status_.bytesWritten = 0;
@@ -188,17 +204,47 @@ void FlashManager::workerLoop() {
       continue;
     }
 
-    setState(FlashState::ConnectingSwd, "Connecting to the STM32 SWD port");
+    uint32_t chipId = status().detectedChipId;
+    if (chipId == 0) {
+      setState(FlashState::ConnectingSwd, "Detecting STM32 target");
+      if (!debug_.connect(error)) {
+        setState(FlashState::Error, "SWD connect failed: " + error);
+        continue;
+      }
+      uint32_t dbgmcuIdcode = 0;
+      if (!debug_.readStm32DebugId(dbgmcuIdcode, error)) {
+        setState(FlashState::Error, "SWD chip ID read failed: " + error);
+        continue;
+      }
+      chipId = dbgmcuIdcode & 0x0FFFU;
+      updateDetectedChip(chipId);
+    }
+    const Stm32ChipInfo &chip = stm32ChipInfo(chipId);
+    FlashBackend *backend = backendForFamily(chip.family);
+    if (!backend) {
+      setState(FlashState::Error, chipId == 0 ? "Connect STM32 target before flashing" : "Unsupported STM32 flash family: " + stm32ChipDisplayName(chipId));
+      continue;
+    }
+    if (!stm32FamilyMatchesChipName(chip.family, manifest.chip)) {
+      setState(FlashState::Error, "Firmware target " + manifest.chip + " does not match detected " + stm32FamilyName(chip.family));
+      continue;
+    }
+
+    portENTER_CRITICAL(&mutex_);
+    status_.flashBackend = backend->transportName();
+    portEXIT_CRITICAL(&mutex_);
+
+    setState(FlashState::ConnectingSwd, String("Using ") + backend->transportName() + " backend");
     setState(FlashState::Erasing, "Erasing target flash");
 
-    if (!swdBackend_.flash(manifest, LittleFS, AppConfig::kFirmwarePath,
-                           [](size_t bytesWritten, size_t totalBytes, const char *message, void *context) {
-                             return static_cast<FlashManager *>(context)->flashProgress(bytesWritten, totalBytes, message);
-                           },
-                           [](uint32_t chipId, void *context) {
-                             static_cast<FlashManager *>(context)->updateDetectedChip(chipId);
-                           },
-                           this, error)) {
+    if (!backend->flash(manifest, LittleFS, AppConfig::kFirmwarePath,
+                        [](size_t bytesWritten, size_t totalBytes, const char *message, void *context) {
+                          return static_cast<FlashManager *>(context)->flashProgress(bytesWritten, totalBytes, message);
+                        },
+                        [](uint32_t chipId, void *context) {
+                          static_cast<FlashManager *>(context)->updateDetectedChip(chipId);
+                        },
+                        this, error)) {
       if (error == "Flashing cancelled") {
         setState(FlashState::Cancelled, "Flash job cancelled");
       } else {
@@ -234,10 +280,14 @@ bool FlashManager::flashProgress(size_t bytesWritten, size_t totalBytes, const c
 }
 
 void FlashManager::updateDetectedChip(uint32_t chipId) {
-  const String name = chipName(chipId);
+  const String name = stm32ChipDisplayName(chipId);
+  const Stm32ChipInfo &chip = stm32ChipInfo(chipId);
+  FlashBackend *backend = backendForFamily(chip.family);
   portENTER_CRITICAL(&mutex_);
-  const bool changed = status_.detectedChip != name;
+  const bool changed = status_.detectedChipId != chipId || status_.detectedChip != name;
   status_.detectedChip = name;
+  status_.detectedChipId = chipId;
+  status_.flashBackend = backend ? backend->transportName() : "unsupported";
   status_.message = "Connected: " + name;
   if (changed) {
     if (status_.log.length() > 0) {
@@ -248,57 +298,20 @@ void FlashManager::updateDetectedChip(uint32_t chipId) {
   portEXIT_CRITICAL(&mutex_);
 }
 
-String FlashManager::chipName(uint32_t chipId) const {
-  switch (chipId) {
-    case 0x0410:
-      return "STM32F1 medium-density (0x0410)";
-    case 0x0412:
-      return "STM32F1 low-density (0x0412)";
-    case 0x0414:
-      return "STM32F1 high-density (0x0414)";
-    case 0x0418:
-      return "STM32F1 connectivity line (0x0418)";
-    case 0x0420:
-      return "STM32F1 value line (0x0420)";
-    case 0x0413:
-      return "STM32F4 (0x0413)";
-    case 0x0419:
-      return "STM32F42x/F43x (0x0419)";
-    case 0x0411:
-      return "STM32F2 (0x0411)";
-    case 0x0433:
-      return "STM32F4/F7 (0x0433)";
-    case 0x0444:
-      return "STM32F0 (0x0444)";
-    case 0x0440:
-      return "STM32F0 small (0x0440)";
-    case 0x0448:
-      return "STM32F0 value line (0x0448)";
-    case 0x0442:
-      return "STM32F0x2 (0x0442)";
-    case 0x0445:
-      return "STM32F04/F07 (0x0445)";
-    case 0x0416:
-      return "STM32L1 medium-density (0x0416)";
-    case 0x0429:
-      return "STM32L1 Cat.5 (0x0429)";
-    case 0x0415:
-      return "STM32L1 high-density (0x0415)";
-    case 0x0435:
-      return "STM32L4 (0x0435)";
-    case 0x0461:
-      return "STM32L4+ (0x0461)";
-    case 0x0450:
-      return "STM32H7 (0x0450)";
-    default: {
-      String hex = String(chipId, HEX);
-      hex.toUpperCase();
-      while (hex.length() < 4) {
-        hex = "0" + hex;
-      }
-      return "STM32 chip ID 0x" + hex;
-    }
+FlashBackend *FlashManager::backendForFamily(Stm32Family family) {
+  switch (family) {
+    case Stm32Family::F1:
+      return &f1Backend_;
+    case Stm32Family::F4:
+      return &f4Backend_;
+    case Stm32Family::F7:
+      return &f7Backend_;
+    case Stm32Family::H7:
+      return &h7Backend_;
+    case Stm32Family::Unknown:
+      break;
   }
+  return nullptr;
 }
 
 void FlashManager::setState(FlashState state, const String &message) {

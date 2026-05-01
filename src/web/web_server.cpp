@@ -10,36 +10,13 @@
 #include "package_store.h"
 #include "hal/target_control.h"
 #include "flash/stm32_swd_debug.h"
-#include "flash/stm32f1_flash.h"
+#include "flash/stm32_chip_info.h"
 
 namespace {
 bool isHexUploadName(const String &filename) {
   String lower = filename;
   lower.toLowerCase();
   return lower.endsWith(".hex") || lower.endsWith(".ihx");
-}
-
-String chipNameFromId(uint32_t chipId) {
-  switch (chipId) {
-    case 0x0410:
-      return "STM32F1 medium-density (0x0410)";
-    case 0x0412:
-      return "STM32F1 low-density (0x0412)";
-    case 0x0414:
-      return "STM32F1 high-density (0x0414)";
-    case 0x0418:
-      return "STM32F1 connectivity line (0x0418)";
-    case 0x0420:
-      return "STM32F1 value line (0x0420)";
-    default: {
-      String hex = String(chipId, HEX);
-      hex.toUpperCase();
-      while (hex.length() < 4) {
-        hex = "0" + hex;
-      }
-      return "STM32 chip ID 0x" + hex;
-    }
-  }
 }
 
 const char kEmbeddedIndexHtml[] PROGMEM = R"HTML(<!doctype html>
@@ -449,6 +426,8 @@ readChipButton.addEventListener('click', async () => {
     const info = await request('/api/target/chip-info', { method: 'POST' });
     chipInfo.textContent =
       `芯片: ${info.chipName || '-'}\n` +
+      `族/后端: ${info.family || '-'}\n` +
+      `Flash: 0x${Number(info.flashStart || 0).toString(16).toUpperCase()} - 0x${Number(info.flashEnd || 0).toString(16).toUpperCase()}\n` +
       `DPIDR: 0x${Number(info.dpidr || 0).toString(16).toUpperCase()}\n` +
       `DBGMCU_IDCODE: 0x${Number(info.dbgmcuIdcode || 0).toString(16).toUpperCase()}\n` +
       `CHIP_ID: 0x${Number(info.chipId || 0).toString(16).toUpperCase()}\n` +
@@ -472,14 +451,12 @@ AppWebServer::AppWebServer(AccessPointManager &apManager,
                            PackageStore &packageStore,
                            FlashManager &flashManager,
                            TargetControl &targetControl,
-                           Stm32SwdDebug &swdDebug,
-                           Stm32F1Flash &stm32F1Flash)
+                           Stm32SwdDebug &swdDebug)
     : apManager_(apManager),
       packageStore_(packageStore),
       flashManager_(flashManager),
       targetControl_(targetControl),
-      swdDebug_(swdDebug),
-      stm32F1Flash_(stm32F1Flash) {}
+      swdDebug_(swdDebug) {}
 
 void AppWebServer::begin() {
   server_ = new WebServer(80);
@@ -573,6 +550,9 @@ void AppWebServer::handleInfo() {
   doc["swdResetPin"] = AppConfig::kSwdResetPin;
   doc["recommendedWiring"] = AppConfig::kRecommendedSwdWiringSummary;
   doc["targetChip"] = status.targetChip;
+  doc["detectedChip"] = status.detectedChip;
+  doc["detectedChipId"] = status.detectedChipId;
+  doc["flashBackend"] = status.flashBackend;
   doc["targetAddress"] = status.targetAddress;
   doc["firmwareCrc32"] = status.firmwareCrc32;
   doc["totalBytes"] = status.totalBytes;
@@ -598,6 +578,8 @@ void AppWebServer::handleStatus() {
   doc["log"] = status.log;
   doc["targetChip"] = status.targetChip;
   doc["detectedChip"] = status.detectedChip;
+  doc["detectedChipId"] = status.detectedChipId;
+  doc["flashBackend"] = status.flashBackend;
   doc["targetAddress"] = status.targetAddress;
   doc["firmwareCrc32"] = status.firmwareCrc32;
   doc["bytesWritten"] = status.bytesWritten;
@@ -678,12 +660,13 @@ void AppWebServer::handleChipInfo() {
   }
 
   uint32_t dbgmcuIdcode = 0;
-  if (!stm32F1Flash_.readChipId(dbgmcuIdcode, error)) {
+  if (!swdDebug_.readStm32DebugId(dbgmcuIdcode, error)) {
     sendError(500, "SWD chip ID read failed: " + error);
     return;
   }
 
   const uint32_t chipId = dbgmcuIdcode & 0x0FFFU;
+  const Stm32ChipInfo &chip = stm32ChipInfo(chipId);
   flashManager_.setDetectedChip(chipId);
 
   JsonDocument doc;
@@ -691,7 +674,10 @@ void AppWebServer::handleChipInfo() {
   doc["dpidr"] = dpId;
   doc["dbgmcuIdcode"] = dbgmcuIdcode;
   doc["chipId"] = chipId;
-  doc["chipName"] = chipNameFromId(chipId);
+  doc["chipName"] = stm32ChipDisplayName(chipId);
+  doc["family"] = stm32FamilyName(chip.family);
+  doc["flashStart"] = chip.flashStart;
+  doc["flashEnd"] = chip.flashEnd;
   doc["lineSample"] = lineSample;
   String payload;
   serializeJson(doc, payload);

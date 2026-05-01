@@ -50,6 +50,10 @@ bool Stm32SwdDebug::readDebugPortId(uint32_t &idcode, String &error) {
   return transport_.readDp(0x00, idcode, error);
 }
 
+bool Stm32SwdDebug::readStm32DebugId(uint32_t &idcode, String &error) {
+  return readMemory32(kDbgmcuIdcode, idcode, error);
+}
+
 bool Stm32SwdDebug::readMemory32(uint32_t address, uint32_t &value, String &error) {
   if (!writeApRegister(kApCsw, kCswWord, error)) {
     return false;
@@ -120,6 +124,48 @@ bool Stm32SwdDebug::writeMemory32(uint32_t address, uint32_t value, String &erro
     return false;
   }
   return writeApRegister(kApDrw, value, error);
+}
+
+bool Stm32SwdDebug::writeMemory32Block(uint32_t address, const uint8_t *data, size_t length, String &error) {
+  if ((address & 0x3U) != 0 || (length & 0x3U) != 0) {
+    error = "MEM-AP word block writes require alignment";
+    return false;
+  }
+  if (length == 0) {
+    return true;
+  }
+  if (!writeApRegister(kApCsw, kCswWord, error)) {
+    return false;
+  }
+
+  size_t offset = 0;
+  while (offset < length) {
+    const uint32_t currentAddress = address + offset;
+    size_t segmentBytes = min(length - offset, static_cast<size_t>(1024 - (currentAddress & 0x3FFU)));
+    segmentBytes &= ~static_cast<size_t>(0x3U);
+    if (segmentBytes == 0) {
+      error = "MEM-AP word block segment is empty";
+      return false;
+    }
+    if (!writeApRegister(kApTar, currentAddress, error)) {
+      return false;
+    }
+    if (!selectApBank(kApDrw >> 4, error)) {
+      return false;
+    }
+    for (size_t segmentOffset = 0; segmentOffset < segmentBytes; segmentOffset += 4) {
+      const size_t dataOffset = offset + segmentOffset;
+      const uint32_t word = static_cast<uint32_t>(data[dataOffset]) |
+                            (static_cast<uint32_t>(data[dataOffset + 1]) << 8) |
+                            (static_cast<uint32_t>(data[dataOffset + 2]) << 16) |
+                            (static_cast<uint32_t>(data[dataOffset + 3]) << 24);
+      if (!transport_.writeAp(kApDrw & 0x0C, word, error)) {
+        return false;
+      }
+    }
+    offset += segmentBytes;
+  }
+  return true;
 }
 
 bool Stm32SwdDebug::writeMemory16(uint32_t address, uint16_t value, String &error) {

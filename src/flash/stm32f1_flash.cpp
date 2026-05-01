@@ -3,7 +3,6 @@
 #include "stm32_swd_debug.h"
 
 namespace {
-constexpr uint32_t kDbgmcuIdcode = 0xE0042000;
 constexpr uint32_t kFlashKeyr = 0x40022004;
 constexpr uint32_t kFlashSr = 0x4002200C;
 constexpr uint32_t kFlashCr = 0x40022010;
@@ -22,10 +21,6 @@ constexpr uint32_t kFlashSrEop = 0x00000020;
 }
 
 Stm32F1Flash::Stm32F1Flash(Stm32SwdDebug &debug) : debug_(debug) {}
-
-bool Stm32F1Flash::readChipId(uint32_t &chipId, String &error) {
-  return debug_.readMemory32(kDbgmcuIdcode, chipId, error);
-}
 
 bool Stm32F1Flash::massErase(String &error) {
   if (!unlock(error)) {
